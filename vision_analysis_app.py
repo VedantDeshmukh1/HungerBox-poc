@@ -693,13 +693,13 @@ def main():
             
             with col2:
                 # Compliance status filter
-                compliance_options = ["All"] + sorted(df['compliance_status'].unique().tolist())
+                compliance_options = ["All"] + sorted([status for status in df['compliance_status'].dropna().unique().tolist()])
                 selected_compliance = st.selectbox("Compliance Status", compliance_options)
             
             with col3:
                 # Severity filter if available
                 if 'severity_level' in df.columns:
-                    severity_options = ["All"] + sorted(df['severity_level'].dropna().unique().tolist())
+                    severity_options = ["All"] + sorted([severity for severity in df['severity_level'].dropna().unique().tolist()])
                     selected_severity = st.selectbox("Severity Level", severity_options)
                 else:
                     selected_severity = "All"
