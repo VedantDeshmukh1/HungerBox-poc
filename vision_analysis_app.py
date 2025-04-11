@@ -981,7 +981,7 @@ def main():
 
 # Add footer
 st.markdown("---")
-st.markdown("© 2025 HungerBox Analytics Platform")
+st.markdown("© 2025 A platfrom for HungerBox Analytics")
 
 # Main entry point
 if __name__ == "__main__":
