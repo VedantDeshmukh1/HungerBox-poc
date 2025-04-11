@@ -258,8 +258,8 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 @st.cache_data
 def load_data():
     try:
-        # Fetch all records from the analysis_results table
-        response = supabase.table('analysis_results').select("*").execute()
+        # Fetch all records from the analysis_results table with no limit
+        response = supabase.table('analysis_results').select("*").limit(100000).execute()
         
         if response.data:
             # Convert to pandas DataFrame
