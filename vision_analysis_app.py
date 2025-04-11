@@ -258,17 +258,25 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 @st.cache_data
 def load_data():
     try:
-        # Fetch all records from the analysis_results table with no limit
-        response = supabase.table('analysis_results').select("*").limit(100000).execute()
-        
-        if response.data:
-            # Convert to pandas DataFrame
-            df = pd.DataFrame(response.data)
-            return df
-        else:
-            st.warning("No data found in the database")
-            return pd.DataFrame()
+        # Initialize an empty list to hold all records
+        all_records = []
+        limit = 1000  # Number of records to fetch per request
+        offset = 0  # Start from the first record
+
+        while True:
+            # Fetch records with pagination
+            response = supabase.table('analysis_results').select("*").range(offset, offset + limit - 1).execute()
             
+            if response.data:
+                all_records.extend(response.data)  # Add fetched records to the list
+                offset += limit  # Move to the next set of records
+            else:
+                break  # Exit loop if no more records are found
+
+        # Convert to pandas DataFrame
+        df = pd.DataFrame(all_records)
+        return df
+
     except Exception as e:
         st.error(f"Error loading data from Supabase: {e}")
         return pd.DataFrame()
