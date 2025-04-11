@@ -7,5 +7,5 @@ plotly
 Pillow
 openpyxl
 requests
-supabase-py
+supabase
 openai
