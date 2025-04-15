@@ -15,6 +15,10 @@ import base64
 import datetime
 from openai import OpenAI
 from supabase import create_client
+from opik.integrations.openai import track_openai
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Set page configuration
 st.set_page_config(
@@ -790,9 +794,12 @@ def main():
     # Tab 2: Visual Analyzer
     with tab2:
         st.markdown('<div class="main-header">Food Safety Visual Analyzer</div>', unsafe_allow_html=True)
-        st.markdown('<div class="sub-header">AI-powered compliance assessment for cafeteria operations</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sub-header">AI-powered compliance assessment with Analytics</div>', unsafe_allow_html=True)
         
         st.markdown('<div class="info-box">Upload a cafeteria image and enter a food safety question to receive an AI-powered compliance analysis.</div>', unsafe_allow_html=True)
+        
+        # Add OPIK info box
+        #st.info("📊 Cost tracking enabled with OPIK - monitoring OpenAI API usage")
         
         # Input Section
         with st.form("vision_input_form", clear_on_submit=False):
@@ -838,8 +845,18 @@ def main():
                         image.save(buffered, format="PNG")
                         img_base64 = base64.b64encode(buffered.getvalue()).decode()
 
-                        # Create OpenAI client
-                        client = OpenAI(api_key=api_key)
+                        # Get OPIK credentials from secrets
+                        opik_api_key = st.secrets["opik"]["api_key"]
+                        opik_workspace = st.secrets["opik"]["workspace"]
+                        opik_project = st.secrets["opik"]["project"]
+
+                        # Set OPIK environment variables
+                        os.environ["OPIK_API_KEY"] = opik_api_key
+                        os.environ["OPIK_WORKSPACE"] = opik_workspace
+                        os.environ["OPIK_PROJECT_NAME"] = opik_project
+
+                        # Create tracked OpenAI client
+                        client = track_openai(OpenAI(api_key=api_key))
 
                         # Construct analysis prompt
                         prompt = f"""
@@ -865,7 +882,7 @@ def main():
                         - "tags": List of 3-5 descriptive tags (e.g., kitchen, storage, cleanliness, etc.)
                         """
 
-                        # API Call
+                        # API Call - now automatically tracked by OPIK
                         response = client.chat.completions.create(
                             model="gpt-4o",
                             messages=[{
