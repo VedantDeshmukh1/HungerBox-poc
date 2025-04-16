@@ -12,9 +12,15 @@ from io import BytesIO
 from collections import Counter
 import os
 import base64
-import datetime
+from datetime import datetime
 from openai import OpenAI
 from supabase import create_client
+import logging
+import time
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Set page configuration
 st.set_page_config(
@@ -305,6 +311,70 @@ def upload_image_to_supabase(image_data, file_name):
 
     except Exception as e:
         st.error(f"Error uploading image to storage: {str(e)}")
+        return None
+
+# Update the feedback and upload functions with better logging
+def upload_feedback_image_to_supabase(image_data, file_name):
+    try:
+        logger.info(f"Attempting to upload feedback image: {file_name}")
+        
+        # Check if feedback_images bucket exists first
+        try:
+            logger.info("Checking if feedback_images bucket exists")
+            buckets = supabase.storage.list_buckets()
+            logger.info(f"Available buckets: {buckets}")
+            
+            bucket_exists = any(bucket['name'] == 'feedback_images' for bucket in buckets)
+            
+            if not bucket_exists:
+                logger.info("Creating feedback_images bucket")
+                supabase.storage.create_bucket('feedback_images', {'public': True})
+                logger.info("Created feedback_images bucket successfully")
+            else:
+                logger.info("Bucket feedback_images already exists")
+                
+        except Exception as e:
+            logger.error(f"Error checking/creating bucket: {str(e)}")
+            # If we can't create a bucket, try to use an existing bucket
+            logger.info("Attempting to use images bucket as fallback")
+
+        # Try to upload to feedback_images bucket, if it fails, try the images bucket
+        try:
+            # Upload the image to feedback_images bucket
+            file_path = f"feedback/{file_name}"
+            logger.info(f"Uploading image to path: {file_path} in feedback_images bucket")
+            
+            upload_result = supabase.storage.from_("feedback_images").upload(
+                path=file_path,
+                file=image_data,
+                file_options={"content-type": "image/png"}
+            )
+            
+            # Get the public URL
+            image_url = supabase.storage.from_("feedback_images").get_public_url(file_path)
+            logger.info(f"Generated public URL: {image_url}")
+            return image_url
+            
+        except Exception as e:
+            logger.error(f"Error uploading to feedback_images bucket: {str(e)}")
+            logger.info("Trying fallback to images bucket")
+            
+            # Fallback to images bucket
+            file_path = f"feedback/{file_name}"
+            upload_result = supabase.storage.from_("images").upload(
+                path=file_path,
+                file=image_data,
+                file_options={"content-type": "image/png"}
+            )
+            
+            # Get the public URL
+            image_url = supabase.storage.from_("images").get_public_url(file_path)
+            logger.info(f"Generated public URL from images bucket: {image_url}")
+            return image_url
+
+    except Exception as e:
+        logger.error(f"Error uploading feedback image: {str(e)}")
+        st.error(f"Error uploading feedback image to storage: {str(e)}")
         return None
 
 # Update the display_image function to handle both base64 and URL images
@@ -826,7 +896,7 @@ def main():
             st.markdown("---")
             submitted = st.form_submit_button("Analyze Compliance", use_container_width=True)
 
-        # Analysis Logic
+        # Analysis Logic - Store results in session state to persist between interactions
         if submitted:
             if not all([api_key, cafeteria_name, question, uploaded_image]):
                 st.error("⚠️ Please fill all required fields and upload an image")
@@ -837,10 +907,14 @@ def main():
                         buffered = BytesIO()
                         image.save(buffered, format="PNG")
                         img_base64 = base64.b64encode(buffered.getvalue()).decode()
-
+                        
+                        # Save image in session state to persist after form submission
+                        if 'image' not in st.session_state:
+                            st.session_state.image = image
+                        
                         # Create OpenAI client
                         client = OpenAI(api_key=api_key)
-
+                        
                         # Construct analysis prompt
                         prompt = f"""
                         You are a food safety manager analyzing a cafeteria image for compliance with food safety standards.
@@ -865,7 +939,8 @@ def main():
                         - "tags": List of 3-5 descriptive tags (e.g., kitchen, storage, cleanliness, etc.)
                         """
 
-                        # API Call
+                        # API Call with logging
+                        logger.info("Making OpenAI API call")
                         response = client.chat.completions.create(
                             model="gpt-4o",
                             messages=[{
@@ -879,105 +954,259 @@ def main():
                             }],
                             response_format={"type": "json_object"}
                         )
+                        logger.info("OpenAI API call completed successfully")
 
                         # Process response
                         result = json.loads(response.choices[0].message.content)
-                        analysis_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                        # Display Results
-                        st.success("✅ Analysis Complete!")
-                        display_vision_results(result, cafeteria_name, question, analysis_date)
+                        analysis_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         
-                        # Option to save results
-                        st.markdown("---")
-                        save_col1, save_col2 = st.columns([3, 1])
+                        # Store results in session state
+                        st.session_state.result = result
+                        st.session_state.cafeteria_name = cafeteria_name
+                        st.session_state.question = question
+                        st.session_state.analysis_date = analysis_date
+                        st.session_state.has_analysis = True
                         
-                        with save_col1:
-                            st.info("Would you like to add this analysis to your records?")
-                        
-                        with save_col2:
-                            if st.button("Save Analysis"):
-                                try:
-                                    # First, handle the image upload
-                                    buffered = BytesIO()
-                                    image.save(buffered, format="PNG")
-                                    image_data = buffered.getvalue()
-                                    
-                                    # Generate a unique filename
-                                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                    file_name = f"{cafeteria_name.replace(' ', '_')}_{timestamp}.png"
-                                    
-                                    # Upload image to Supabase storage
-                                    image_url = upload_image_to_supabase(image_data, file_name)
-                                    
-                                    if image_url:
-                                        # Create a new row for the analysis
-                                        new_data = {
-                                            'question': question,
-                                            'upload_links (images)': json.dumps([image_url]),  # Store the public URL
-                                            'answer_type': 'boolean',
-                                            'cafeteria name': cafeteria_name,  # Space in column name preserved
-                                            'compliance_status': result.get('criteria_met', 'Unknown'),
-                                            'explanation': result.get('explanation', ''),
-                                            'improvement_suggestions': result.get('improvements', ''),
-                                            'severity_level': result.get('severity', 'Unknown'),
-                                            'image_quality_issues': ', '.join(result.get('image_quality_issues', ['none'])) if isinstance(result.get('image_quality_issues'), list) else result.get('image_quality_issues', 'none'),
-                                            'quality_assessment': result.get('quality_assessment', ''),
-                                            'tags': ', '.join(result.get('tags', [])) if isinstance(result.get('tags'), list) else result.get('tags', ''),
-                                            'analysis_date': datetime.now().date().isoformat()
-                                        }
-
-                                        # Debug information
-                                        st.write("Attempting to save the following data:")
-                                        st.json(new_data)
-
-                                        try:
-                                            # Insert data into Supabase with error handling
-                                            response = supabase.table('analysis_results').insert(new_data).execute()
-                                            
-                                            if hasattr(response, 'data') and response.data:
-                                                st.success("✅ Analysis saved to database successfully!")
-                                                
-                                                # Show saved record ID and image URL
-                                                record_id = response.data[0].get('id')
-                                                st.info(f"""
-                                                Record saved with ID: {record_id}
-                                                Image URL: {image_url}
-                                                """)
-
-                                                # Option to export to Excel
-                                                if st.button("Export to Excel"):
-                                                    # Fetch updated data
-                                                    df = load_data()
-                                                    if not df.empty:
-                                                        # Save to Excel
-                                                        temp_file = f"analysis_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-                                                        df.to_excel(temp_file, index=False)
-                                                        
-                                                        with open(temp_file, 'rb') as f:
-                                                            st.download_button(
-                                                                label="Download Excel Export",
-                                                                data=f,
-                                                                file_name=temp_file,
-                                                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                                            )
-                                            else:
-                                                st.error("Failed to save analysis to database - no data returned")
-                                                if hasattr(response, 'error'):
-                                                    st.error(f"Error details: {response.error}")
-                                                
-                                        except Exception as e:
-                                            st.error(f"Database error: {str(e)}")
-                                            import traceback
-                                            st.error(f"Full error trace:\n{traceback.format_exc()}")
-                                    else:
-                                        st.error("Failed to upload image to storage")
-                                    
-                                except Exception as e:
-                                    st.error(f"Error preparing data: {str(e)}")
+                        logger.info(f"Analysis complete: {result}")
 
                 except Exception as e:
+                    logger.error(f"Analysis failed: {str(e)}")
                     st.error(f"Analysis failed: {str(e)}")
+                    st.session_state.has_analysis = False
+
+        # Check if we have analysis results in session state and display them
+        # This section is outside the form to prevent refreshing
+        if 'has_analysis' in st.session_state and st.session_state.has_analysis:
+            # Display Results
+            st.success("✅ Analysis Complete!")
+            display_vision_results(
+                st.session_state.result, 
+                st.session_state.cafeteria_name, 
+                st.session_state.question, 
+                st.session_state.analysis_date
+            )
+            
+            # Add feedback section - outside the form to prevent refresh
+            st.markdown("---")
+            st.subheader("📝 Provide Feedback")
+            st.markdown("Your feedback helps us improve our analysis quality.")
+            
+            feedback_col1, feedback_col2 = st.columns(2)
+            
+            with feedback_col1:
+                satisfied = st.radio("Are you satisfied with this analysis?", ["Yes", "No"], key="feedback_satisfied")
+            
+            with feedback_col2:
+                feedback_text = st.text_area(
+                    "Additional feedback (optional)", 
+                    placeholder="Please share any thoughts about the analysis...",
+                    height=100,
+                    key="feedback_text"
+                )
+            
+            if st.button("Submit Feedback", key="submit_feedback"):
+                try:
+                    logger.info("Attempting to submit feedback")
+                    
+                    # Check if feedback table exists
+                    try:
+                        # First check if the table exists
+                        logger.info("Checking if feedback table exists")
+                        # We'll try a basic operation that should succeed if the table exists
+                        test_query = supabase.table('feedback').select('count', count='exact').execute()
+                        logger.info("Feedback table exists")
+                    except Exception as e:
+                        error_msg = str(e)
+                        logger.error(f"Error checking feedback table: {error_msg}")
+                        
+                        if "does not exist" in error_msg:
+                            st.error("The feedback table does not exist in the database. Please create it first.")
+                            st.code("""
+CREATE TABLE IF NOT EXISTS public.feedback (
+  id SERIAL PRIMARY KEY,
+  analysis_id INTEGER REFERENCES public.analysis_results(id),
+  satisfied BOOLEAN NOT NULL,
+  feedback_text TEXT,
+  image_url TEXT,
+  cafeteria_name TEXT NOT NULL,
+  question TEXT NOT NULL,
+  compliance_status TEXT,
+  explanation TEXT,
+  improvement_suggestions TEXT,
+  severity_level TEXT,
+  image_quality_issues TEXT,
+  quality_assessment TEXT,
+  analysis_date DATE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+                            """, language="sql")
+                            return
+                        
+                    # Upload a copy of the image for feedback
+                    buffered = BytesIO()
+                    st.session_state.image.save(buffered, format="PNG")
+                    image_data = buffered.getvalue()
+                    
+                    # Generate a unique filename
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    feedback_file_name = f"feedback_{st.session_state.cafeteria_name.replace(' ', '_')}_{timestamp}.png"
+                    
+                    # Upload image to Supabase feedback bucket with logging
+                    logger.info(f"Uploading feedback image: {feedback_file_name}")
+                    feedback_image_url = upload_feedback_image_to_supabase(image_data, feedback_file_name)
+                    
+                    if feedback_image_url:
+                        logger.info(f"Feedback image uploaded successfully: {feedback_image_url}")
+                        
+                        # Prepare feedback data with analysis results
+                        feedback_data = {
+                            'satisfied': True if satisfied == "Yes" else False,
+                            'feedback_text': feedback_text,
+                            'image_url': feedback_image_url,
+                            'cafeteria_name': st.session_state.cafeteria_name,
+                            'question': st.session_state.question,
+                            'compliance_status': st.session_state.result.get('criteria_met', 'Unknown'),
+                            'explanation': st.session_state.result.get('explanation', ''),
+                            'improvement_suggestions': st.session_state.result.get('improvements', ''),
+                            'severity_level': st.session_state.result.get('severity', 'Unknown'),
+                            'image_quality_issues': ', '.join(st.session_state.result.get('image_quality_issues', ['none'])) if isinstance(st.session_state.result.get('image_quality_issues'), list) else st.session_state.result.get('image_quality_issues', 'none'),
+                            'quality_assessment': st.session_state.result.get('quality_assessment', ''),
+                            'analysis_date': datetime.now().date().isoformat()
+                        }
+                        
+                        # If we have an analysis_id (if analysis was saved), include it
+                        if 'analysis_id' in st.session_state:
+                            feedback_data['analysis_id'] = st.session_state.analysis_id
+                        
+                        # Insert feedback into Supabase with logging
+                        logger.info(f"Inserting feedback data into Supabase: {feedback_data}")
+                        feedback_response = supabase.table('feedback').insert(feedback_data).execute()
+                        
+                        if hasattr(feedback_response, 'data') and feedback_response.data:
+                            logger.info(f"Feedback submitted successfully: {feedback_response.data}")
+                            st.success("✅ Thank you for your feedback!")
+                        else:
+                            error_msg = "Failed to submit feedback - no data returned"
+                            if hasattr(feedback_response, 'error'):
+                                error_msg += f": {feedback_response.error}"
+                            logger.error(error_msg)
+                            st.error(error_msg)
+                    else:
+                        logger.error("Failed to upload feedback image")
+                        st.error("Failed to upload feedback image")
+                        
+                except Exception as e:
+                    logger.error(f"Error submitting feedback: {str(e)}")
+                    st.error(f"Error submitting feedback: {str(e)}")
+                    import traceback
+                    trace = traceback.format_exc()
+                    logger.error(f"Full error trace:\n{trace}")
+                    st.error(f"Full error trace:\n{trace}")
+            
+            # Option to save results - outside the form to prevent refresh
+            st.markdown("---")
+            save_col1, save_col2 = st.columns([3, 1])
+            
+            # with save_col1:
+            #     st.info("Would you like to add this analysis to your records?")
+            
+            # with save_col2:
+            #     if st.button("Save Analysis", key="save_analysis"):
+            #         try:
+            #             logger.info("Attempting to save analysis to database")
+            #             # First, handle the image upload
+            #             buffered = BytesIO()
+            #             st.session_state.image.save(buffered, format="PNG")
+            #             image_data = buffered.getvalue()
+                        
+            #             # Generate a unique filename
+            #             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            #             file_name = f"{st.session_state.cafeteria_name.replace(' ', '_')}_{timestamp}.png"
+                        
+            #             # Upload image to Supabase storage with logging
+            #             logger.info(f"Uploading analysis image: {file_name}")
+            #             image_url = upload_image_to_supabase(image_data, file_name)
+                        
+            #             if image_url:
+            #                 logger.info(f"Analysis image uploaded successfully: {image_url}")
+                            
+            #                 # Create a new row for the analysis
+            #                 new_data = {
+            #                     'question': st.session_state.question,
+            #                     'upload_links (images)': json.dumps([image_url]),  # Store the public URL
+            #                     'answer_type': 'boolean',
+            #                     'cafeteria name': st.session_state.cafeteria_name,  # Space in column name preserved
+            #                     'compliance_status': st.session_state.result.get('criteria_met', 'Unknown'),
+            #                     'explanation': st.session_state.result.get('explanation', ''),
+            #                     'improvement_suggestions': st.session_state.result.get('improvements', ''),
+            #                     'severity_level': st.session_state.result.get('severity', 'Unknown'),
+            #                     'image_quality_issues': ', '.join(st.session_state.result.get('image_quality_issues', ['none'])) if isinstance(st.session_state.result.get('image_quality_issues'), list) else st.session_state.result.get('image_quality_issues', 'none'),
+            #                     'quality_assessment': st.session_state.result.get('quality_assessment', ''),
+            #                     'tags': ', '.join(st.session_state.result.get('tags', [])) if isinstance(st.session_state.result.get('tags'), list) else st.session_state.result.get('tags', ''),
+            #                     'analysis_date': datetime.now().date().isoformat()
+            #                 }
+
+            #                 # Log the data being saved
+            #                 logger.info(f"Saving analysis data to Supabase: {new_data}")
+            #                 st.write("Attempting to save the following data:")
+            #                 st.json(new_data)
+
+            #                 try:
+            #                     # Insert data into Supabase with error handling
+            #                     logger.info("Executing Supabase insert operation")
+            #                     response = supabase.table('analysis_results').insert(new_data).execute()
+                                
+            #                     if hasattr(response, 'data') and response.data:
+            #                         logger.info(f"Analysis saved successfully: {response.data}")
+            #                         st.success("✅ Analysis saved to database successfully!")
+                                    
+            #                         # Show saved record ID and image URL
+            #                         record_id = response.data[0].get('id')
+            #                         # Store analysis_id in session state for feedback reference
+            #                         st.session_state.analysis_id = record_id
+                                    
+            #                         st.info(f"""
+            #                         Record saved with ID: {record_id}
+            #                         Image URL: {image_url}
+            #                         """)
+
+            #                         # Option to export to Excel
+            #                         if st.button("Export to Excel", key="export_excel"):
+            #                             # Fetch updated data
+            #                             df = load_data()
+            #                             if not df.empty:
+            #                                 # Save to Excel
+            #                                 temp_file = f"analysis_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            #                                 df.to_excel(temp_file, index=False)
+                                            
+            #                                 with open(temp_file, 'rb') as f:
+            #                                     st.download_button(
+            #                                         label="Download Excel Export",
+            #                                         data=f,
+            #                                         file_name=temp_file,
+            #                                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            #                                     )
+            #                     else:
+            #                         error_msg = "Failed to save analysis to database - no data returned"
+            #                         if hasattr(response, 'error'):
+            #                             error_msg += f": {response.error}"
+            #                         logger.error(error_msg)
+            #                         st.error(error_msg)
+                                    
+            #                 except Exception as e:
+            #                     logger.error(f"Database error: {str(e)}")
+            #                     st.error(f"Database error: {str(e)}")
+            #                     import traceback
+            #                     trace = traceback.format_exc()
+            #                     logger.error(f"Full error trace:\n{trace}")
+            #                     st.error(f"Full error trace:\n{trace}")
+            #             else:
+            #                 logger.error("Failed to upload image to storage")
+            #                 st.error("Failed to upload image to storage")
+                        
+            #         except Exception as e:
+            #             logger.error(f"Error preparing data: {str(e)}")
+            #             st.error(f"Error preparing data: {str(e)}")
 
 # Add footer
 st.markdown("---")
