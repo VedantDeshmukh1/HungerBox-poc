@@ -433,8 +433,21 @@ def display_vision_results(result, cafeteria_name, question, analysis_date):
             
         with col2:
             status = result.get('criteria_met', 'Unknown')
-            status_icon = "✅" if status == "Yes" else "❌" if status == "No" else "❓"
-            st.markdown(f"**Compliance Status:** {status_icon} {status}")
+            
+            # Display confidence score with progress bar
+            confidence_score = result.get('confidence_score', 0.0)
+            confidence_display = f"{confidence_score:.2f}"
+            confidence_color = "green" if confidence_score >= 0.6 else "orange" if confidence_score >= 0.4 else "red"
+            
+            st.markdown(f"**Confidence Score:** <span style='color:{confidence_color};'>{confidence_display}</span>", unsafe_allow_html=True)
+            st.progress(float(confidence_score))
+            
+            # Use confidence threshold for compliance determination
+            threshold_met = confidence_score >= 0.6
+            status_icon = "✅" if threshold_met else "❌"
+            compliance_status = "Yes" if threshold_met else "No"
+            
+            st.markdown(f"**Compliance Status:** {status_icon} {compliance_status}")
             
             severity = result.get('severity', 'Unknown')
             color_class = severity_color.get(severity, "")
@@ -831,6 +844,13 @@ def main():
                         status_color = "green" if row['compliance_status'] == 'Yes' else "red" if row['compliance_status'] == 'No' else "orange"
                         st.markdown(f"**Compliance Status:** <span style='color:{status_color};'>{row['compliance_status']}</span>", unsafe_allow_html=True)
                         
+                        # Add confidence score display if available
+                        if 'confidence_score' in row and pd.notna(row['confidence_score']):
+                            confidence = float(row['confidence_score'])
+                            confidence_color = "green" if confidence >= 0.6 else "orange" if confidence >= 0.4 else "red"
+                            st.markdown(f"**Confidence Score:** <span style='color:{confidence_color};'>{confidence:.2f}</span>", unsafe_allow_html=True)
+                            st.progress(confidence)
+                        
                         if 'severity_level' in row and pd.notna(row['severity_level']):
                             severity_color = "red" if row['severity_level'] == 'Critical' else "orange" if row['severity_level'] == 'Major' else "yellow" if row['severity_level'] == 'Minor' else "green"
                             st.markdown(f"**Severity Level:** <span style='color:{severity_color};'>{row['severity_level']}</span>", unsafe_allow_html=True)
@@ -860,6 +880,12 @@ def main():
                         
                         if 'analysis_date' in row and pd.notna(row['analysis_date']):
                             st.markdown(f"**Analysis Date:** {row['analysis_date']}")
+                        
+                        # Add feedback form at the bottom of each record
+                        if 'id' in row:
+                            show_record_feedback_form(row['id'], row['cafeteria name'], row['question'], row)
+                        else:
+                            st.warning("Cannot submit feedback: Record ID not available")
     
     # Tab 2: Visual Analyzer
     with tab2:
@@ -932,7 +958,7 @@ def main():
                         # Create tracked OpenAI client
                         client = track_openai(OpenAI(api_key=api_key))
                         
-                        # Construct analysis prompt
+                        # Construct analysis prompt with confidence score
                         prompt = f"""
                         You are a food safety manager analyzing a cafeteria image for compliance with food safety standards.
                         Question to evaluate: {question}
@@ -944,10 +970,16 @@ def main():
                            - The question requires documentation of an empty, vacant, or clear area, AND
                            - Quality issues do not prevent confirming compliance.
                         4. Otherwise, dark or blurry images without context are non-compliant ("No").
+                        5. Provide a confidence score between 0 and 1 that indicates your certainty in the assessment.
+                           - A score of 0.9-1.0 means very high confidence
+                           - A score of 0.6-0.9 means good confidence
+                           - A score of 0.4-0.6 means moderate confidence
+                           - A score below 0.4 means low confidence
 
                         OUTPUT:
                         Return a JSON object with:
                         - "criteria_met": "Yes" (compliant), "No" (non-compliant), or "Unable to determine" (quality prevents assessment)
+                        - "confidence_score": A floating point value between 0-1 indicating your confidence level
                         - "explanation": 2-3 sentences explaining your assessment
                         - "improvements": Actionable recommendations if issues are found (empty string if none)
                         - "severity": "Critical" (immediate health risk), "Major" (significant violation), "Minor" (small issue), or "None" (compliant)
@@ -1115,10 +1147,6 @@ CREATE TABLE IF NOT EXISTS public.feedback (
                 except Exception as e:
                     logger.error(f"Error submitting feedback: {str(e)}")
                     st.error(f"Error submitting feedback: {str(e)}")
-                    import traceback
-                    trace = traceback.format_exc()
-                    logger.error(f"Full error trace:\n{trace}")
-                    st.error(f"Full error trace:\n{trace}")
             
             # Option to save results - outside the form to prevent refresh
             st.markdown("---")
@@ -1153,7 +1181,8 @@ CREATE TABLE IF NOT EXISTS public.feedback (
             #                     'upload_links (images)': json.dumps([image_url]),  # Store the public URL
             #                     'answer_type': 'boolean',
             #                     'cafeteria name': st.session_state.cafeteria_name,  # Space in column name preserved
-            #                     'compliance_status': st.session_state.result.get('criteria_met', 'Unknown'),
+            #                     'compliance_status': "Yes" if st.session_state.result.get('confidence_score', 0) >= 0.6 else "No",
+            #                     'confidence_score': st.session_state.result.get('confidence_score', 0),
             #                     'explanation': st.session_state.result.get('explanation', ''),
             #                     'improvement_suggestions': st.session_state.result.get('improvements', ''),
             #                     'severity_level': st.session_state.result.get('severity', 'Unknown'),
@@ -1228,6 +1257,80 @@ CREATE TABLE IF NOT EXISTS public.feedback (
 # Add footer
 st.markdown("---")
 st.markdown("© 2025 A platfrom for HungerBox Analytics")
+
+# Add feedback function for individual records
+def show_record_feedback_form(record_id, cafeteria_name, question, record_data):
+    st.markdown("---")
+    st.subheader("📝 Provide Feedback on This Record")
+    st.markdown("Your feedback helps us improve our analysis quality.")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        satisfied = st.radio(f"Are you satisfied with this analysis? (ID: {record_id})", 
+                            ["Yes", "No"], 
+                            key=f"feedback_satisfied_{record_id}")
+    
+    with col2:
+        feedback_text = st.text_area(
+            "Additional feedback (optional)", 
+            placeholder="Please share any thoughts about the analysis...",
+            height=100,
+            key=f"feedback_text_{record_id}"
+        )
+    
+    if st.button("Submit Feedback", key=f"submit_feedback_{record_id}"):
+        try:
+            logger.info(f"Attempting to submit feedback for record ID: {record_id}")
+            
+            # Prepare feedback data
+            feedback_data = {
+                'analysis_id': record_id,
+                'satisfied': True if satisfied == "Yes" else False,
+                'feedback_text': feedback_text,
+                'cafeteria_name': cafeteria_name,
+                'question': question,
+                'compliance_status': record_data.get('compliance_status', 'Unknown'),
+                'explanation': record_data.get('explanation', ''),
+                'improvement_suggestions': record_data.get('improvement_suggestions', ''),
+                'severity_level': record_data.get('severity_level', 'Unknown'),
+                'image_quality_issues': record_data.get('image_quality_issues', 'none'),
+                'quality_assessment': record_data.get('quality_assessment', ''),
+                'analysis_date': datetime.now().date().isoformat()
+            }
+            
+            # Get image URL if available
+            if 'upload_links (images)' in record_data and record_data['upload_links (images)']:
+                try:
+                    # Extract URL from the field
+                    image_url = record_data['upload_links (images)']
+                    if image_url.startswith('['):
+                        # It's a JSON string containing URLs
+                        urls = json.loads(image_url)
+                        if isinstance(urls, list) and urls:
+                            feedback_data['image_url'] = urls[0]
+                    else:
+                        # It's a direct URL
+                        feedback_data['image_url'] = image_url
+                except:
+                    logger.warning(f"Could not parse image URL for record {record_id}")
+            
+            # Insert feedback into Supabase
+            feedback_response = supabase.table('feedback').insert(feedback_data).execute()
+            
+            if hasattr(feedback_response, 'data') and feedback_response.data:
+                logger.info(f"Feedback submitted successfully for record {record_id}")
+                st.success(f"✅ Thank you for your feedback on record #{record_id}!")
+            else:
+                error_msg = "Failed to submit feedback - no data returned"
+                if hasattr(feedback_response, 'error'):
+                    error_msg += f": {feedback_response.error}"
+                logger.error(error_msg)
+                st.error(error_msg)
+                
+        except Exception as e:
+            logger.error(f"Error submitting feedback for record {record_id}: {str(e)}")
+            st.error(f"Error submitting feedback: {str(e)}")
 
 # Main entry point
 if __name__ == "__main__":
