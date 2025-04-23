@@ -10,3 +10,4 @@ requests
 supabase
 openai
 opik
+wordcloud
