@@ -197,7 +197,7 @@ def load_data_from_supabase():
         offset = 0
         
         while True:
-            response = supabase.table("food_safety_records").select("*").range(offset, offset + page_size - 1).execute()
+            response = supabase.table("IBM_checklist").select("*").range(offset, offset + page_size - 1).execute()
             
             if response.data:
                 all_records.extend(response.data)  # Add fetched records to the list
@@ -271,7 +271,7 @@ def upload_excel_to_supabase(uploaded_file):
         
         for i in range(0, len(records), batch_size):
             batch = records[i:i+batch_size]
-            result = supabase.table("food_safety_records").insert(batch).execute()
+            result = supabase.table("IBM_checklist").insert(batch).execute()
             results.append(result)
             
         st.success(f"Successfully uploaded {len(records)} records to Supabase!")
@@ -287,7 +287,7 @@ def generate_insert_sql(uploaded_file):
         df = pd.read_excel(uploaded_file)
         
         # Convert DataFrame to SQL INSERT statements
-        table_name = "food_safety_records"
+        table_name = "IBM_checklist"
         
         # Start SQL script
         sql_script = f"-- SQL Script to insert food safety records\n\n"
