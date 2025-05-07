@@ -7,3 +7,4 @@ requests>=2.28.0
 plotly>=5.13.0 
 xlsxwriter
 supabase
+python-dotenv
