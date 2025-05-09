@@ -433,7 +433,18 @@ def analyze_image(client, row, max_retries=3):
                 }
 
 # Function to analyze selected locations
-def analyze_selected_locations(df, selected_cafes, selected_vendors, api_key=None):
+def analyze_selected_locations(df, selected_cafes, selected_vendors, api_key=None, vendors_only=False):
+    """
+    Analyze selected locations with improved filtering
+    
+    Parameters:
+    - df: DataFrame with checklist data
+    - selected_cafes: List of cafe names to analyze
+    - selected_vendors: List of vendor names to analyze
+    - api_key: OpenAI API key (optional)
+    - vendors_only: If True, analyze only vendor entries in selected cafes
+                    If False, analyze all cafe entries
+    """
     # Use st.secrets if api_key not provided
     if api_key is None:
         api_key = st.secrets["openai"]["api_key"]
@@ -441,24 +452,40 @@ def analyze_selected_locations(df, selected_cafes, selected_vendors, api_key=Non
     # Configure OpenAI client
     client = OpenAI(api_key=api_key)
     
-    # Filter data for selected cafes and vendors
-    cafe_filter = (df['checklist_type'] == 'cafe') & (df['location_name'].isin(selected_cafes))
-    vendor_filter = (df['checklist_type'] == 'vendor') & (df['location_name'].isin(selected_vendors))
-    filtered_df = df[cafe_filter | vendor_filter].copy()
+    # Filter data based on selection mode
+    if vendors_only and selected_vendors:
+        # Only analyze vendor-specific entries in the selected cafes
+        # This requires BOTH location_name in selected_cafes AND vendor_name in selected_vendors
+        print(f"Analysis mode: VENDOR SPECIFIC - only analyzing entries for {len(selected_vendors)} vendors in {len(selected_cafes)} cafes")
+        
+        # Create strict filter for vendor entries
+        filtered_df = df[
+            (df['location_name'].isin(selected_cafes)) & 
+            (df['vendor_name'].isin(selected_vendors))
+        ].copy()
+    else:
+        # Analyze all cafe entries (the full cafe analysis)
+        print(f"Analysis mode: FULL CAFE - analyzing all entries for {len(selected_cafes)} cafes")
+        
+        # Filter only by location_name 
+        filtered_df = df[df['location_name'].isin(selected_cafes)].copy()
     
     # Show count of entries for each selected location
     print("\nEntries to be analyzed:")
-    for location_type, location_name in [('cafe', cafe) for cafe in selected_cafes] + [('vendor', vendor) for vendor in selected_vendors]:
-        location_df = filtered_df[(filtered_df['checklist_type'] == location_type) & (filtered_df['location_name'] == location_name)]
-        count = len(location_df)
-        print(f"{location_name} ({location_type}): {count} entries")
+    for cafe in selected_cafes:
+        cafe_count = len(filtered_df[filtered_df['location_name'] == cafe])
+        print(f"{cafe} (cafe): {cafe_count} entries")
+    
+    if selected_vendors:
+        for vendor in selected_vendors:
+            vendor_count = len(filtered_df[filtered_df['vendor_name'] == vendor])
+            print(f"{vendor} (vendor): {vendor_count} entries")
     
     # Create an output file path
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     output_file = f"location_analysis_{timestamp}.xlsx"
     
     # Add new columns to the dataframe for analysis results
-    # We're keeping all existing columns and just adding our analysis columns
     filtered_df['compliance_status'] = None
     filtered_df['explanation'] = None
     filtered_df['improvement_suggestions'] = None
@@ -472,7 +499,7 @@ def analyze_selected_locations(df, selected_cafes, selected_vendors, api_key=Non
     total_rows = len(filtered_df)
     analyzed_count = 0
     
-    # Filter to focus only on entries with image uploads (as requested)
+    # Filter to focus only on entries with image uploads
     image_df = filtered_df[~filtered_df['upload_links'].isna() & (filtered_df['upload_links'] != '')]
     print(f"\nFound {len(image_df)} entries with images to analyze out of {total_rows} total entries")
     
@@ -482,7 +509,9 @@ def analyze_selected_locations(df, selected_cafes, selected_vendors, api_key=Non
     
     for idx, row in image_df.iterrows():
         analyzed_count += 1
-        print(f"\nAnalyzing record {analyzed_count}/{len(image_df)} for {row['location_name']} ({row['checklist_type']})")
+        # Include vendor info in log if available
+        vendor_info = f" - {row['vendor_name']}" if pd.notna(row['vendor_name']) else ""
+        print(f"\nAnalyzing record {analyzed_count}/{len(image_df)} for {row['location_name']}{vendor_info}")
         print(f"Question: {row['question']}")
         
         result = analyze_image(client, row)

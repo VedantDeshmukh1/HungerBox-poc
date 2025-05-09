@@ -4,6 +4,7 @@ import openai
 from dotenv import load_dotenv
 import datetime
 import os
+import toml
 from mapping_questions import categorize_questions
 from analyze_checklist import identify_unique_locations, analyze_selected_locations, generate_summary
 import supabase
@@ -12,8 +13,23 @@ import uuid
 
 # Page configuration
 st.set_page_config(page_title="Food Safety Analyzer", layout="wide", page_icon="🍽️")
-# Remove load_dotenv() since we'll use st.secrets
-# load_dotenv()
+
+# Load secrets from the local file
+try:
+    secrets_path = os.path.join(os.path.dirname(__file__), "secrets.toml")
+    if os.path.exists(secrets_path):
+        secrets = toml.load(secrets_path)
+        # Make secrets available in st.secrets
+        for section, values in secrets.items():
+            if section not in st.secrets:
+                st.secrets[section] = {}
+            for key, value in values.items():
+                st.secrets[section][key] = value
+        print("Loaded secrets from local file")
+    else:
+        print("No local secrets file found, using Streamli  t's secrets if available")
+except Exception as e:
+    print(f"Error loading secrets: {e}")
 
 # Set OpenAI API key using st.secrets
 openai.api_key = st.secrets["openai"]["api_key"]
@@ -79,6 +95,278 @@ def reset_all():
     st.session_state.entries_saved = 0
     st.session_state.all_entries_saved = False
     st.session_state.supabase_ids = []
+
+def create_cafe_vendor_mapping(df):
+    """Creates a mapping between cafes and their associated vendors based on vendor_name column"""
+    cafe_vendor_mapping = {}
+    
+    # Check if required columns exist
+    required_cols = ['location_name', 'checklist_type', 'vendor_name']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    
+    if missing_cols:
+        st.warning(f"Missing required columns: {', '.join(missing_cols)}. Vendor mapping may be incomplete.")
+        return {}
+    
+    # Get all cafe locations
+    cafe_locations = df[df['checklist_type'] == 'cafe']['location_name'].unique()
+    
+    # For each cafe, find all vendors that serve there
+    for cafe in cafe_locations:
+        # Get all vendors associated with this cafe
+        cafe_vendors_df = df[(df['checklist_type'] == 'vendor') & 
+                           (df['location_name'] == cafe)]
+        
+        # If vendors exist for this cafe
+        if not cafe_vendors_df.empty:
+            # Get unique vendor names, excluding None/NaN values
+            vendors = cafe_vendors_df['vendor_name'].dropna().unique()
+            vendors = [v for v in vendors if v and str(v).lower() != 'none'] 
+            
+            if len(vendors) > 0:
+                cafe_vendor_mapping[cafe] = sorted(list(vendors))
+        
+        # If the cafe has checklist entries where vendor_name is filled
+        vendor_from_cafe_entries = df[(df['checklist_type'] == 'cafe') & 
+                                    (df['location_name'] == cafe) & 
+                                    (df['vendor_name'].notna())]
+        
+        if not vendor_from_cafe_entries.empty:
+            # Get unique vendor names from cafe entries
+            additional_vendors = vendor_from_cafe_entries['vendor_name'].dropna().unique()
+            additional_vendors = [v for v in additional_vendors if v and str(v).lower() != 'none']
+            
+            # Add these vendors to the mapping
+            if len(additional_vendors) > 0:
+                if cafe in cafe_vendor_mapping:
+                    # Add to existing vendors, avoiding duplicates
+                    cafe_vendor_mapping[cafe] = sorted(list(set(cafe_vendor_mapping[cafe] + additional_vendors)))
+                else:
+                    cafe_vendor_mapping[cafe] = sorted(list(additional_vendors))
+    
+    # Also look for vendors with vendor_name not empty
+    vendor_entries = df[(df['checklist_type'] == 'vendor') & (df['vendor_name'].notna())]
+    
+    for vendor_loc in vendor_entries['location_name'].unique():
+        # Get vendors at this location
+        vendors_at_loc = vendor_entries[vendor_entries['location_name'] == vendor_loc]['vendor_name'].dropna().unique()
+        vendors_at_loc = [v for v in vendors_at_loc if v and str(v).lower() != 'none']
+        
+        if len(vendors_at_loc) > 0:
+            if vendor_loc in cafe_vendor_mapping:
+                # Add to existing vendors, avoiding duplicates
+                cafe_vendor_mapping[vendor_loc] = sorted(list(set(cafe_vendor_mapping[vendor_loc] + list(vendors_at_loc))))
+            else:
+                cafe_vendor_mapping[vendor_loc] = sorted(list(vendors_at_loc))
+    
+    return cafe_vendor_mapping
+
+# Add a helper function to get vendors with their café affiliations
+def get_vendor_cafe_mapping(selected_cafes, selected_vendors, cafe_vendor_mapping):
+    """Create a mapping of vendors to their serving cafés"""
+    vendor_cafe_mapping = {}
+    for vendor in selected_vendors:
+        serving_cafes = []
+        for cafe in selected_cafes:
+            if cafe in cafe_vendor_mapping and vendor in cafe_vendor_mapping[cafe]:
+                serving_cafes.append(cafe)
+        vendor_cafe_mapping[vendor] = serving_cafes
+    return vendor_cafe_mapping
+
+def filter_data_for_analysis(df, selected_cafes, selected_vendors, vendors_only=False):
+    """
+    Filter data for analysis based on selected cafes and vendors
+    
+    If vendors_only is True:
+      - Process ONLY rows where location_name is in selected_cafes AND vendor_name is in selected_vendors
+    
+    If vendors_only is False (analyze all cafe):
+      - Process ALL rows where location_name is in selected_cafes
+    """
+    # Create a copy of the dataframe to avoid SettingWithCopyWarning
+    filtered_df = df.copy()
+    
+    # Print diagnostic information
+    st.write(f"Total rows in dataset: {len(filtered_df)}")
+    st.write(f"Selected cafes: {selected_cafes}")
+    st.write(f"Selected vendors: {selected_vendors}")
+    
+    if vendors_only and selected_vendors:
+        # STRICT FILTER: Only rows that match BOTH selected cafes AND selected vendors
+        # This is different from the previous logic - we only want exact matches
+        mask = (
+            filtered_df['location_name'].isin(selected_cafes) & 
+            filtered_df['vendor_name'].isin(selected_vendors)
+        )
+        
+        result_df = filtered_df[mask]
+        
+        # Count matches
+        match_count = len(result_df)
+        st.write(f"Rows matching both selected cafes AND selected vendors: {match_count}")
+        
+        # If no matches found with strict filtering, provide a clearer message
+        if match_count == 0:
+            st.error("No entries found with the selected vendors in these cafes.")
+            st.write("This could be because:")
+            st.write("1. The vendor_name field might be empty or have different values than expected")
+            st.write("2. The selected vendors might not have entries in the selected cafes")
+            
+            # Show a sample of the data to help diagnose
+            st.write("Sample vendor_name values in the dataset:")
+            vendor_sample = filtered_df['vendor_name'].dropna().unique()[:10]
+            st.write(vendor_sample)
+            
+            # Return empty DataFrame - DON'T use fallbacks as requested
+            return pd.DataFrame()
+    else:
+        # Analyze all cafe entries: include all rows for selected cafes
+        mask = filtered_df['location_name'].isin(selected_cafes)
+        result_df = filtered_df[mask]
+        st.write(f"Rows matching selected cafes (all entries): {len(result_df)}")
+        
+        if len(result_df) == 0:
+            st.error("No entries found for the selected cafes.")
+            # Return empty DataFrame - DON'T use fallbacks
+            return pd.DataFrame()
+    
+    # Additional analysis to help debug
+    if not result_df.empty:
+        # Show rows with upload_links
+        has_uploads = len(result_df[result_df['upload_links'].notna() & (result_df['upload_links'] != '')])
+        st.write(f"Of these, {has_uploads} rows have images (upload_links)")
+        
+        # Show breakdown by cafe
+        st.write("Rows per cafe:")
+        for cafe in selected_cafes:
+            cafe_rows = len(result_df[result_df['location_name'] == cafe])
+            st.write(f"- {cafe}: {cafe_rows} rows")
+        
+        # If analyzing vendors, show breakdown by vendor
+        if vendors_only and selected_vendors:
+            st.write("Rows per vendor:")
+            for vendor in selected_vendors:
+                vendor_rows = len(result_df[result_df['vendor_name'] == vendor])
+                st.write(f"- {vendor}: {vendor_rows} rows")
+    
+    return result_df
+
+def direct_analyze(df, cafes, vendors, api_key, vendors_only=False):
+    """Improved direct pass-through to analyze_selected_locations"""
+    if df.empty:
+        st.error("Empty dataframe provided for analysis")
+        return pd.DataFrame()
+    
+    # Print diagnostic information
+    st.write(f"Analysis details:")
+    st.write(f"- Total rows provided: {len(df)}")
+    st.write(f"- Selected cafes: {cafes}")
+    st.write(f"- Selected vendors: {vendors}")
+    st.write(f"- Analysis mode: {'Vendor-specific only' if vendors_only else 'Full cafe analysis'}")
+    
+    # Make a copy of the dataframe to avoid modifying the original
+    analysis_df = df.copy()
+    
+    # CRITICAL: Make sure there are rows that match the filter criteria
+    cafe_filter = analysis_df['location_name'].isin(cafes)
+    cafe_rows = len(analysis_df[cafe_filter])
+    st.write(f"- Rows matching selected cafes: {cafe_rows}")
+    
+    if vendors_only:
+        # For vendor-specific analysis, we need to ensure there are 
+        # matching rows with both location_name and vendor_name
+        vendor_rows = len(analysis_df[
+            cafe_filter & 
+            analysis_df['vendor_name'].isin(vendors)
+        ])
+        st.write(f"- Rows matching both cafe and vendor filters: {vendor_rows}")
+        
+        if vendor_rows == 0:
+            st.error("No rows match both cafe and vendor criteria in the original data")
+            return pd.DataFrame()
+    
+    # Check for upload_links column
+    if 'upload_links' not in analysis_df.columns:
+        st.warning("No 'upload_links' column found. Adding empty column.")
+        analysis_df['upload_links'] = ""
+    
+    # Check if any rows have images
+    if vendors_only:
+        rows_with_images = len(analysis_df[
+            cafe_filter & 
+            analysis_df['vendor_name'].isin(vendors) &
+            analysis_df['upload_links'].notna() & 
+            (analysis_df['upload_links'] != '')
+        ])
+    else:
+        rows_with_images = len(analysis_df[
+            cafe_filter & 
+            analysis_df['upload_links'].notna() & 
+            (analysis_df['upload_links'] != '')
+        ])
+    
+    st.write(f"- Rows with images to analyze: {rows_with_images}")
+    
+    if rows_with_images == 0:
+        st.warning("No rows with images found for processing. The analysis will likely return empty results.")
+    
+    try:
+        # Track time to show progress
+        start_time = datetime.datetime.now()
+        st.write(f"Starting analysis at {start_time.strftime('%H:%M:%S')}")
+        
+        # Call analyze_selected_locations with the vendors_only parameter
+        result = analyze_selected_locations(
+            analysis_df, cafes, vendors, api_key, vendors_only
+        )
+        
+        end_time = datetime.datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        st.write(f"Analysis completed in {duration:.1f} seconds")
+        
+        return result
+    except Exception as e:
+        st.error(f"Error in analyze_selected_locations: {str(e)}")
+        st.exception(e)
+        # Return original dataframe with error columns
+        analysis_df['compliance_status'] = "Error"
+        analysis_df['explanation'] = f"Analysis failed: {str(e)}"
+        return analysis_df
+
+def analyze_selected_locations_wrapper(df, cafes, vendors, api_key, vendors_only=False):
+    """Modified wrapper to call analyze_selected_locations with the proper arguments"""
+    # Clone dataframe to avoid modifying original
+    analysis_df = df.copy()
+    
+    # Create a progress bar
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    try:
+        # Call the original function but make sure to pass all rows
+        # analyze_selected_locations will do its own filtering
+        status_text.text("Running analysis...")
+        result = analyze_selected_locations(analysis_df, cafes, vendors, api_key)
+        progress_bar.progress(100)
+        status_text.text("Analysis complete!")
+        
+        # Check results
+        if isinstance(result, pd.DataFrame) and len(result) > 0:
+            status_text.text(f"Analysis returned {len(result)} rows of results")
+            return result
+        else:
+            st.warning("Analysis returned empty results. This might be an issue with the data or the analysis function.")
+            # Return the original with a message
+            analysis_df['compliance_status'] = "No results"
+            analysis_df['explanation'] = "Analysis completed but returned no results"
+            return analysis_df
+            
+    except Exception as e:
+        st.error(f"Error in analyze_selected_locations: {str(e)}")
+        # Return original dataframe with error columns
+        analysis_df['compliance_status'] = "Error"
+        analysis_df['explanation'] = f"Analysis failed: {str(e)}"
+        return analysis_df
 
 def main():
     # App header with styling
@@ -197,6 +485,35 @@ def main():
                 else:
                     df = pd.read_excel(uploaded_file)
                 
+                # Handle common column format issues
+                
+                # Fix company_name if it exists but has spaces or capitalization issues
+                cols_lower = [col.lower().strip() for col in df.columns]
+                if 'company_name' not in df.columns and 'company name' in cols_lower:
+                    actual_col = df.columns[cols_lower.index('company name')]
+                    df.rename(columns={actual_col: 'company_name'}, inplace=True)
+                    
+                # Similarly fix other important columns
+                column_mappings = {
+                    'company name': 'company_name',
+                    'companyname': 'company_name',
+                    'location name': 'location_name',
+                    'locationname': 'location_name',
+                    'checklist name': 'checklist_name',
+                    'checklistname': 'checklist_name',
+                    'checklist type': 'checklist_type',
+                    'checklisttype': 'checklist_type',
+                    'question': 'question',
+                    'vendor name': 'vendor_name',
+                    'vendorname': 'vendor_name',
+                }
+                
+                # Apply mappings where needed
+                for wrong_name, right_name in column_mappings.items():
+                    if wrong_name in cols_lower and right_name not in df.columns:
+                        actual_col = df.columns[cols_lower.index(wrong_name)]
+                        df.rename(columns={actual_col: right_name}, inplace=True)
+                
                 # Store in session state
                 st.session_state.df = df
             else:
@@ -252,10 +569,12 @@ def main():
                     if 'question' not in st.session_state.df.columns:
                         st.session_state.df['question'] = st.session_state.df['questions']
                     
-                    # Identify unique cafes and vendors
+                    # Modify here: Create a mapping between cafes and their vendors
+                    st.session_state.cafe_vendor_mapping = create_cafe_vendor_mapping(st.session_state.df)
+                    
+                    # Continue with the existing code
                     unique_cafes, unique_vendors, locations_output = identify_unique_locations(st.session_state.df)
                     
-                    # Store in session state
                     st.session_state.unique_cafes = unique_cafes
                     st.session_state.unique_vendors = unique_vendors
                     st.session_state.locations_output = locations_output
@@ -292,6 +611,28 @@ def main():
         # Display the unique cafes and vendors 
         with st.expander("Show all identified locations", expanded=False):
             st.code(st.session_state.locations_output)
+            
+            # Add display of cafe-vendor relationships with better formatting
+            if st.session_state.cafe_vendor_mapping:
+                st.markdown("### Cafe-Vendor Relationships")
+                
+                # Create a table for better presentation
+                relationship_data = []
+                for cafe, vendors in st.session_state.cafe_vendor_mapping.items():
+                    for vendor in vendors:
+                        relationship_data.append({
+                            "Cafe Location": cafe,
+                            "Vendor": vendor
+                        })
+                
+                if relationship_data:
+                    st.dataframe(pd.DataFrame(relationship_data), use_container_width=True)
+                else:
+                    st.info("No vendor relationships found in the data")
+
+        # Initialize cafe_vendor_mapping if not present
+        if 'cafe_vendor_mapping' not in st.session_state:
+            st.session_state.cafe_vendor_mapping = {}
 
         # Create columns for location selection
         col1, col2 = st.columns(2)
@@ -316,21 +657,56 @@ def main():
 
         with col2:
             st.markdown("#### Select Vendors (max 5)")
-            vendor_options = [(i, vendor) for i, vendor in enumerate(st.session_state.unique_vendors)]
             
-            # Use multiselect for better UX
-            selected_vendors_names = st.multiselect(
-                "Choose vendors:",
-                options=[vendor for _, vendor in vendor_options],
-                default=st.session_state.selected_vendors,
-                key="vendor_selector"
-            )
+            # Get all vendors from selected cafes
+            available_vendors = []
+            vendor_to_cafe_map = {}
             
-            st.session_state.selected_vendors = selected_vendors_names
+            for cafe in st.session_state.selected_cafes:
+                if cafe in st.session_state.cafe_vendor_mapping:
+                    for vendor in st.session_state.cafe_vendor_mapping[cafe]:
+                        available_vendors.append(vendor)
+                        if vendor in vendor_to_cafe_map:
+                            vendor_to_cafe_map[vendor].append(cafe)
+                        else:
+                            vendor_to_cafe_map[vendor] = [cafe]
             
-            if len(selected_vendors_names) > 5:
-                st.warning("You selected more than 5 vendors. Only the first 5 will be analyzed.")
-                st.session_state.selected_vendors = selected_vendors_names[:5]
+            # Remove duplicates but preserve ordering
+            available_vendors = list(dict.fromkeys(available_vendors))
+            
+            if available_vendors:
+                # Format options to show where each vendor serves
+                vendor_options = []
+                for vendor in available_vendors:
+                    cafes = vendor_to_cafe_map[vendor]
+                    if len(cafes) > 1:
+                        vendor_options.append(f"{vendor} - Serves in: {', '.join(cafes)}")
+                    else:
+                        vendor_options.append(f"{vendor} - {cafes[0]}")
+            
+                # Use multiselect with the formatted options
+                selected_vendor_options = st.multiselect(
+                    "Choose vendors serving in the selected cafe(s):",
+                    options=vendor_options,
+                    default=[opt for opt in vendor_options if any(v in opt for v in st.session_state.selected_vendors)],
+                    key="vendor_selector"
+                )
+                
+                # Extract the actual vendor names from the options
+                selected_vendors_names = [opt.split(" - ")[0] for opt in selected_vendor_options]
+                
+                st.session_state.selected_vendors = selected_vendors_names
+                
+                if len(selected_vendors_names) > 5:
+                    st.warning("You selected more than 5 vendors. Only the first 5 will be analyzed.")
+                    st.session_state.selected_vendors = selected_vendors_names[:5]
+            else:
+                st.info("No vendors available for the selected cafes.")
+                st.session_state.selected_vendors = []
+
+        # If no cafes are selected but vendors are, show guidance
+        if not st.session_state.selected_cafes and st.session_state.selected_vendors:
+            st.warning("Please select at least one cafe to analyze vendors within it.")
         
         st.markdown("</div>", unsafe_allow_html=True)
         
@@ -341,10 +717,34 @@ def main():
         if st.session_state.selected_cafes or st.session_state.selected_vendors:
             st.markdown("<div class='info-box'>", unsafe_allow_html=True)
             st.write("Selected locations for analysis:")
+            
             if st.session_state.selected_cafes:
-                st.write("- Cafes: " + ", ".join(st.session_state.selected_cafes))
+                st.write("### Selected Cafes:")
+                for cafe in st.session_state.selected_cafes:
+                    st.write(f"- {cafe}")
+            
             if st.session_state.selected_vendors:
-                st.write("- Vendors: " + ", ".join(st.session_state.selected_vendors))
+                st.write("### Selected Vendors:")
+                # Group vendors by cafés
+                vendor_to_cafes = {}
+                for vendor in st.session_state.selected_vendors:
+                    vendor_to_cafes[vendor] = []
+                    for cafe in st.session_state.selected_cafes:
+                        if cafe in st.session_state.cafe_vendor_mapping and vendor in st.session_state.cafe_vendor_mapping[cafe]:
+                            vendor_to_cafes[vendor].append(cafe)
+                
+                for vendor, cafes in vendor_to_cafes.items():
+                    if cafes:
+                        cafe_list = ", ".join(cafes)
+                        st.write(f"- {vendor} (serves in: {cafe_list})")
+                    else:
+                        st.write(f"- {vendor}")
+            
+            # Add an option to analyze entire cafes or just vendors
+            analyze_entire_cafes = False
+            if st.session_state.selected_vendors:
+                analyze_entire_cafes = st.checkbox("Also analyze the entire cafes (not just the selected vendors)", value=False)
+            
             st.markdown("</div>", unsafe_allow_html=True)
             
             if not st.session_state.analysis_complete:
@@ -355,13 +755,30 @@ def main():
                             if 'question' not in st.session_state.df.columns:
                                 st.session_state.df['question'] = st.session_state.df['questions']
                             
-                            # Run the analysis
-                            analyzed_df = analyze_selected_locations(
-                                st.session_state.df, 
-                                st.session_state.selected_cafes, 
-                                st.session_state.selected_vendors, 
-                                openai.api_key
+                            # Show data summary header
+                            st.subheader("Analysis Setup")
+                            
+                            # Prepare for analysis based on selection mode
+                            vendors_only = st.session_state.selected_vendors and not analyze_entire_cafes
+                            
+                            if vendors_only:
+                                st.write("Mode: Analyzing ONLY selected vendors within selected cafes")
+                            else:
+                                st.write("Mode: Analyzing ALL entries in selected cafes")
+                            
+                            # Pass the vendors_only parameter to direct_analyze
+                            analyzed_df = direct_analyze(
+                                st.session_state.df,
+                                st.session_state.selected_cafes,
+                                st.session_state.selected_vendors,
+                                openai.api_key,
+                                vendors_only
                             )
+                            
+                            # Check if analysis produced results
+                            if analyzed_df.empty:
+                                st.error("Analysis completed but no results were produced.")
+                                return
                             
                             # Generate summary
                             summary = generate_summary(analyzed_df)
@@ -370,6 +787,7 @@ def main():
                             st.session_state.analyzed_df = analyzed_df
                             st.session_state.summary = summary
                             st.session_state.analysis_complete = True
+                            st.session_state.analyzed_vendors_only = vendors_only
                             
                             st.success("Analysis completed successfully!")
                             st.rerun()
@@ -392,6 +810,12 @@ def main():
         if st.session_state.analysis_complete:
             st.markdown("<div class='step-container'>", unsafe_allow_html=True)
             st.markdown("<h2 class='subheader'>Step 5: Review Results</h2>", unsafe_allow_html=True)
+            
+            # Display analysis mode
+            if hasattr(st.session_state, 'analyzed_vendors_only') and st.session_state.analyzed_vendors_only:
+                st.info("Analysis was performed on vendor-specific entries only.")
+            else:
+                st.info("Analysis was performed on all entries for the selected cafes and vendors.")
             
             # Display analysis results
             with st.expander("Analysis Summary", expanded=True):
