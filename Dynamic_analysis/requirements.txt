@@ -8,3 +8,5 @@ plotly>=5.13.0
 xlsxwriter
 supabase
 python-dotenv
+google-generativeai
+google.generativeai

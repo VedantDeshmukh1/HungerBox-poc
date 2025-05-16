@@ -13,6 +13,8 @@ import time
 from collections import Counter
 import re
 import streamlit as st
+import google.generativeai as genai
+import base64
 
 # Add at the top of the file after imports
 skip_count = 0  # Global counter for skipped OpenAI analyses
@@ -289,7 +291,7 @@ def get_prompt_template(categories):
     return default_template
 
 # Function to analyze an image using OpenAI
-def analyze_image(client, row, max_retries=3):
+def analyze_image(client, row, max_retries=3, model_type="openai"):
     # Get the question
     question = row['question']
     
@@ -354,7 +356,7 @@ def analyze_image(client, row, max_retries=3):
             if not is_single_color_image(temp_file_path) or blankallowdquestion(question):
                 global skip_count
                 skip_count += 1
-                print("Image is a single color. Skipping OpenAI analysis.")
+                print("Image is a single color. Skipping analysis.")
                 
                 return {
                         "criteria_met": "Unable to determine",
@@ -366,29 +368,76 @@ def analyze_image(client, row, max_retries=3):
                         "tags": ["too_dark"]
                 }
             else:
-                print("Image is not a single color. Proceeding with OpenAI analysis.")
-                # Now proceed with OpenAI analysis
-                print("Sending image to OpenAI for analysis...")
-                response = client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[{
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": image_url,
-                                },
-                            },
-                        ],
-                    }],
-                    response_format={"type": "json_object"}
-                )
+                print(f"Image is not a single color. Proceeding with {model_type} analysis...")
                 
-            # Parse the result
-            result = json.loads(response.choices[0].message.content)
-            print("Analysis completed successfully.")
+                if model_type == "openai":
+                    # Proceed with OpenAI analysis
+                    print("Sending image to OpenAI for analysis...")
+                    response = client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": image_url,
+                                    },
+                                },
+                            ],
+                        }],
+                        response_format={"type": "json_object"}
+                    )
+                    # Parse the result
+                    result = json.loads(response.choices[0].message.content)
+                
+                elif model_type == "gemini":
+                    # Proceed with Gemini analysis
+                    print("Sending image to Gemini for analysis...")
+                    
+                    # Convert image data for Gemini
+                    img_bytes = BytesIO(response.content)
+                    
+                    # Create a gemini model
+                    gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+                    
+                    # Create the request with image and text
+                    gemini_response = gemini_model.generate_content([
+                        prompt,
+                        {"mime_type": "image/jpeg", "data": base64.b64encode(img_bytes.getvalue()).decode('utf-8')}
+                    ])
+                    
+                    # Format the response as JSON - Gemini needs explicit instruction to return JSON
+                    try:
+                        # First try to directly parse if Gemini returned JSON
+                        result = json.loads(gemini_response.text)
+                    except json.JSONDecodeError:
+                        # If not JSON, extract JSON-like structure from response text
+                        # Look for JSON-like structure in the text
+                        json_start = gemini_response.text.find('{')
+                        json_end = gemini_response.text.rfind('}') + 1
+                        
+                        if json_start >= 0 and json_end > json_start:
+                            try:
+                                json_str = gemini_response.text[json_start:json_end]
+                                result = json.loads(json_str)
+                            except:
+                                # Last resort - create a structured result from the text
+                                print("Could not parse JSON from Gemini response, creating structured result")
+                                result = {
+                                    "criteria_met": "Unable to determine",
+                                    "explanation": gemini_response.text[:500],  # Limit length
+                                    "improvements": "Analysis output not in expected format",
+                                    "severity": "Unknown",
+                                    "image_quality_issues": ["analysis_format_error"],
+                                    "quality_assessment": "Response not in expected format",
+                                    "tags": ["format_error", "unstructured_response"]
+                                }
+                else:
+                    raise ValueError(f"Unknown model type: {model_type}")
+                
+                print("Analysis completed successfully.")
 
             # Clean up temporary file
             if temp_file_path and os.path.exists(temp_file_path):
@@ -432,8 +481,12 @@ def analyze_image(client, row, max_retries=3):
                     "tags": ["error", "analysis_failed", "technical_issue"]
                 }
 
+# Function to initialize Gemini
+def init_gemini(api_key):
+    genai.configure(api_key=api_key)
+
 # Function to analyze selected locations
-def analyze_selected_locations(df, selected_cafes, selected_vendors, api_key=None, vendors_only=False):
+def analyze_selected_locations(df, selected_cafes, selected_vendors, api_key=None, vendors_only=False, model_type="openai", gemini_api_key=None):
     """
     Analyze selected locations with improved filtering
     
@@ -444,13 +497,23 @@ def analyze_selected_locations(df, selected_cafes, selected_vendors, api_key=Non
     - api_key: OpenAI API key (optional)
     - vendors_only: If True, analyze only vendor entries in selected cafes
                     If False, analyze all cafe entries
+    - model_type: The model to use for analysis ("openai" or "gemini")
+    - gemini_api_key: Google Gemini API key (required if model_type is "gemini")
     """
     # Use st.secrets if api_key not provided
-    if api_key is None:
+    if api_key is None and model_type == "openai":
         api_key = st.secrets["openai"]["api_key"]
     
-    # Configure OpenAI client
-    client = OpenAI(api_key=api_key)
+    # Configure clients based on model type
+    if model_type == "openai":
+        client = OpenAI(api_key=api_key)
+    elif model_type == "gemini":
+        if gemini_api_key is None:
+            gemini_api_key = st.secrets["gemini"]["api_key"]
+        init_gemini(gemini_api_key)
+        client = None  # Not used for Gemini
+    else:
+        raise ValueError(f"Unsupported model type: {model_type}")
     
     # Filter data based on selection mode
     if vendors_only and selected_vendors:
@@ -494,6 +557,7 @@ def analyze_selected_locations(df, selected_cafes, selected_vendors, api_key=Non
     filtered_df['quality_assessment'] = None
     filtered_df['analysis_tags'] = None
     filtered_df['analysis_date'] = None
+    filtered_df['model_used'] = model_type  # Track which model was used
     
     # Analyze each row that has image data
     total_rows = len(filtered_df)
@@ -514,7 +578,7 @@ def analyze_selected_locations(df, selected_cafes, selected_vendors, api_key=Non
         print(f"\nAnalyzing record {analyzed_count}/{len(image_df)} for {row['location_name']}{vendor_info}")
         print(f"Question: {row['question']}")
         
-        result = analyze_image(client, row)
+        result = analyze_image(client, row, model_type=model_type)
         
         # Format image quality issues as string if it's a list
         image_quality_issues = result.get('image_quality_issues', ['none'])
@@ -535,6 +599,7 @@ def analyze_selected_locations(df, selected_cafes, selected_vendors, api_key=Non
         filtered_df.at[idx, 'quality_assessment'] = result.get('quality_assessment', '')
         filtered_df.at[idx, 'analysis_tags'] = tags
         filtered_df.at[idx, 'analysis_date'] = datetime.datetime.now().strftime("%Y-%m-%d")
+        filtered_df.at[idx, 'model_used'] = model_type
         
         print(f"Compliance: {filtered_df.at[idx, 'compliance_status']}")
         print(f"Severity: {filtered_df.at[idx, 'severity_level']}")

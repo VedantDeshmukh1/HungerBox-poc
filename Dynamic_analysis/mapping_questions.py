@@ -2,11 +2,19 @@ import pandas as pd
 import openai
 import os
 import streamlit as st
+import google.generativeai as genai
 
 # Use st.secrets for OpenAI API key
 openai.api_key = st.secrets["openai"]["api_key"]
 
-def categorize_questions(questions_df):
+# Initialize Gemini (if API key is available)
+def init_gemini():
+    if "gemini" in st.secrets and "api_key" in st.secrets["gemini"]:
+        genai.configure(api_key=st.secrets["gemini"]["api_key"])
+        return True
+    return False
+
+def categorize_questions(questions_df, model_type="openai"):
     # Create categories list
     categories = [
         "Hygiene & Cleanliness",
@@ -15,6 +23,13 @@ def categorize_questions(questions_df):
         "Hardware (Assets) & Other Equipment",
         "Marketing"
     ]
+    
+    # Initialize Gemini if needed
+    if model_type == "gemini":
+        gemini_available = init_gemini()
+        if not gemini_available:
+            st.warning("Gemini API key not found. Falling back to OpenAI for categorization.")
+            model_type = "openai"
     
     # Create an empty list to store categorization results
     all_categorizations = []
@@ -29,7 +44,7 @@ def categorize_questions(questions_df):
             all_categorizations.append('')
             continue
         
-        # Create prompt for OpenAI
+        # Create prompt for categorization
         prompt = f"""
         Categorize the following question into one or more of these categories. 
         Return only the categories separated by commas, without any other text.
@@ -46,20 +61,37 @@ def categorize_questions(questions_df):
         Output format should be only the category names separated by commas, for example: "Hygiene & Cleanliness, Food Safety Compliance"
         """
         
-        # Call OpenAI API
+        # Call API based on selected model
         try:
-            response = openai.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant that categorizes questions about food service operations."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.1,
-                max_tokens=100
-            )
+            if model_type == "openai":
+                # Call OpenAI API
+                response = openai.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant that categorizes questions about food service operations."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.1,
+                    max_tokens=100
+                )
+                
+                # Extract categorization
+                categorization = response.choices[0].message.content.strip()
             
-            # Extract categorization
-            categorization = response.choices[0].message.content.strip()
+            elif model_type == "gemini":
+                # Call Gemini API
+                gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+                
+                gemini_response = gemini_model.generate_content([
+                    "You are a helpful assistant that categorizes questions about food service operations.",
+                    prompt
+                ])
+                
+                # Extract categorization
+                categorization = gemini_response.text.strip()
+            
+            else:
+                raise ValueError(f"Unsupported model type: {model_type}")
             
             # Format categorization with square brackets
             categories_list = [cat.strip() for cat in categorization.split(',')]
@@ -76,6 +108,7 @@ def categorize_questions(questions_df):
     
     # Add categorizations to the dataframe
     questions_df['categorization'] = all_categorizations
+    questions_df['model_used'] = model_type
     
     return questions_df
 

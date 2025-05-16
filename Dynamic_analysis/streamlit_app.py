@@ -69,6 +69,8 @@ if 'all_entries_saved' not in st.session_state:
     st.session_state.all_entries_saved = False
 if 'supabase_ids' not in st.session_state:
     st.session_state.supabase_ids = []
+if 'selected_model' not in st.session_state:
+    st.session_state.selected_model = "openai"
 
 def reset_analysis():
     """Reset analysis-related session state"""
@@ -263,6 +265,7 @@ def direct_analyze(df, cafes, vendors, api_key, vendors_only=False):
     st.write(f"- Selected cafes: {cafes}")
     st.write(f"- Selected vendors: {vendors}")
     st.write(f"- Analysis mode: {'Vendor-specific only' if vendors_only else 'Full cafe analysis'}")
+    st.write(f"- Model: {st.session_state.selected_model}")
     
     # Make a copy of the dataframe to avoid modifying the original
     analysis_df = df.copy()
@@ -315,9 +318,14 @@ def direct_analyze(df, cafes, vendors, api_key, vendors_only=False):
         start_time = datetime.datetime.now()
         st.write(f"Starting analysis at {start_time.strftime('%H:%M:%S')}")
         
-        # Call analyze_selected_locations with the vendors_only parameter
+        # Set up API keys based on model selection
+        gemini_api_key = st.secrets["gemini"]["api_key"] if "gemini" in st.secrets else None
+        
+        # Call analyze_selected_locations with the selected model
         result = analyze_selected_locations(
-            analysis_df, cafes, vendors, api_key, vendors_only
+            analysis_df, cafes, vendors, api_key, vendors_only,
+            model_type=st.session_state.selected_model,
+            gemini_api_key=gemini_api_key
         )
         
         end_time = datetime.datetime.now()
@@ -346,7 +354,17 @@ def analyze_selected_locations_wrapper(df, cafes, vendors, api_key, vendors_only
         # Call the original function but make sure to pass all rows
         # analyze_selected_locations will do its own filtering
         status_text.text("Running analysis...")
-        result = analyze_selected_locations(analysis_df, cafes, vendors, api_key)
+        
+        # Set up API keys based on model selection
+        gemini_api_key = st.secrets["gemini"]["api_key"] if "gemini" in st.secrets else None
+        
+        result = analyze_selected_locations(
+            analysis_df, cafes, vendors, api_key, 
+            vendors_only=vendors_only,
+            model_type=st.session_state.selected_model,
+            gemini_api_key=gemini_api_key
+        )
+        
         progress_bar.progress(100)
         status_text.text("Analysis complete!")
         
@@ -745,6 +763,27 @@ def main():
             if st.session_state.selected_vendors:
                 analyze_entire_cafes = st.checkbox("Also analyze the entire cafes (not just the selected vendors)", value=False)
             
+            # Add model selection dropdown
+            model_options = {
+                "openai": "OpenAI GPT-4o (Default)",
+                "gemini": "Google Gemini 2.0 Flash" 
+            }
+            
+            selected_model = st.selectbox(
+                "Select Vision Analysis Model:",
+                options=list(model_options.keys()),
+                format_func=lambda x: model_options[x],
+                index=list(model_options.keys()).index(st.session_state.selected_model)
+            )
+            
+            # Update the session state with selected model
+            st.session_state.selected_model = selected_model
+            
+            # Show appropriate warnings based on model selection
+            if st.session_state.selected_model == "gemini":
+                if "gemini" not in st.secrets or "api_key" not in st.secrets["gemini"]:
+                    st.warning("Gemini API key not found in secrets. Please add it to continue.")
+            
             st.markdown("</div>", unsafe_allow_html=True)
             
             if not st.session_state.analysis_complete:
@@ -765,6 +804,9 @@ def main():
                                 st.write("Mode: Analyzing ONLY selected vendors within selected cafes")
                             else:
                                 st.write("Mode: Analyzing ALL entries in selected cafes")
+                            
+                            # Display selected model
+                            st.write(f"Model: {model_options[st.session_state.selected_model]}")
                             
                             # Pass the vendors_only parameter to direct_analyze
                             analyzed_df = direct_analyze(
