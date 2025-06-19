@@ -11,7 +11,7 @@ def get_gpt_client(model_type: str = "openai"):
     Reads API key from environment variable or config.
     """
     if model_type == "openai":
-        #api_key = os.getenv("OPENAI_API_KEY")
+        api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             # Fallback: try to read from a local file or raise error
             try:

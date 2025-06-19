@@ -24,7 +24,7 @@ def main():
         return
 
     # 1. Inputs
-    img_path = "2225563_1741760657.jpg"
+    img_path = "../2225563_1741760657.jpg"
     category = "Hygiene & Cleanliness"
     question = "Are the bins separated?"
     expectation = "Are the bins overflowing?"
